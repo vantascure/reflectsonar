@@ -4,6 +4,7 @@ This module is used to fetch data from SonarQube API
 import traceback
 from typing import Dict, List
 import requests
+import json
 
 from ..data.models import (SonarQubeProject, SonarQubeIssue, SonarQubeMeasure, # pylint: disable=import-error
                          SonarQubeHotspot, ReportData, SonarQubeRule)  # pylint: disable=import-error
@@ -89,12 +90,68 @@ def get_code_snippet(base_url: str, token: str, component: str, line: int) -> st
         traceback.print_exc()
         return ""
 
+def fetch_all_issues(base_url: str, token: str, project_key: str, verbose : bool) -> Dict:
+    severities = ["INFO", "LOW", "MEDIUM", "HIGH", "BLOCKER"]
+    categories = ["SECURITY", "MAINTAINABILITY", "RELIABILITY"]
+    all_issues = []
+    filtered_list = []
+    for category in categories:
+        for severity in severities:
+            all_issues.extend(fetch_issues_paginated(base_url, token, project_key, severity, category, True))
+    for issue in all_issues:
+        if all(issue["key"] != existing["key"] for existing in filtered_list):
+            filtered_list.append(issue)
+    with open('test.json', 'w') as f:
+        f.write(json.dumps(filtered_list))
+    return {
+        "issues" : filtered_list,
+        "paging": {
+            "pageIndex": 1,
+            "pageSize": len(all_issues),
+            "total": len(all_issues)
+        }
+    }
+
+def fetch_issues_paginated(base_url: str, token: str, project_key : str, severity : str, category : str, verbose):
+    """Fetches all security hotspots from a project"""
+    all_issues = []
+    page = 1
+    page_size = 500  # Maximum page size
+    current_total = 0
+    while True:
+        issues_url = f"{base_url}/api/issues/search?componentKeys={project_key}&ps={page_size}&p={page}&impactSeverities={severity}&impactSoftwareQualities={category}" # pylint: disable=line-too-long
+
+        try:
+            page_data = fetch(f"Issues for Category:{category} and Severity:{severity} on page {page}...", issues_url, token, verbose)
+            page_issues = page_data.get("issues", [])
+
+            all_issues.extend(page_issues)
+
+            # Check if we have more pages
+            paging = page_data.get("paging", {})
+            total = paging.get("total", 0)
+            current_total += len(page_issues)
+
+            if current_total >= total:
+                break
+
+            page += 1
+
+        except requests.RequestException as e:
+            print(f"ERROR: Failed to fetch issues page {page}: {e}")
+            break
+
+    # Return in the same format as the original API response
+    return all_issues
+
+
+
 def fetch_all_hotspots(base_url: str, token: str, project_key: str) -> Dict:
     """Fetches all security hotspots from a project"""
     all_hotspots = []
     page = 1
     page_size = 500  # Maximum page size
-
+    current_total = 0
     while True:
         hotspots_url = f"{base_url}/api/hotspots/search?projectKey={project_key}&ps={page_size}&p={page}" # pylint: disable=line-too-long
 
@@ -107,7 +164,7 @@ def fetch_all_hotspots(base_url: str, token: str, project_key: str) -> Dict:
             # Check if we have more pages
             paging = page_data.get("paging", {})
             total = paging.get("total", 0)
-            current_total = len(all_hotspots)
+            current_total += len(all_hotspots)
 
             if current_total >= total:
                 break
@@ -149,12 +206,11 @@ def get_report_data(base_url: str, token: str,
     metrics_param = ",".join(metric_keys)
 
     component_url = f"{base_url}/api/components/show?component={project_key}"
-    issues_url = f"{base_url}/api/issues/search?componentKeys={project_key}&ps=500"
     measures_url = f"{base_url}/api/measures/component?component={project_key}&metricKeys={metrics_param}" # pylint: disable=line-too-long
     settings_url = f"{base_url}/api/settings/values?keys=sonar.multi-quality-mode.enabled"
 
     component_data = fetch("project component data...", component_url, token, verbose)
-    issues_data = fetch("issues data...", issues_url, token, verbose)
+    issues_data = fetch_all_issues(base_url, token, project_key, verbose)
     measures_data = fetch("measures data...", measures_url, token, verbose)
     settings_data = fetch("SonarQube settings...", settings_url, token, verbose)
     hotspots_data = fetch_all_hotspots(base_url, token, project_key)
